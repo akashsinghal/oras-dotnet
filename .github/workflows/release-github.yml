@@ -48,14 +48,21 @@ jobs:
           REPO="${{ github.repository }}"
           VERSION="${TAG_NAME#v}"
 
-          # Extract PR data from merge commit messages.
-          # Merge commits follow: "title (#num)" pattern.
-          # This avoids API calls and works on forks.
-          PRS=$(git log --oneline "$PREV_TAG..$TAG_NAME" \
-            --grep='(#[0-9]*)' --format="%s%x09%an" \
-            | grep -P '\(#\d+\)' \
-            | sed -E 's/^(.*[^ ]) *\(#([0-9]+)\)\s*\t(.*)$/\2\t\1\t\3/' \
-            | sort -t$'\t' -k1 -n || true)
+          # Extract PR numbers from commit messages, then look up
+          # each PR's metadata via the GitHub API.
+          PR_NUMBERS=$(git log --oneline "$PREV_TAG..$TAG_NAME" \
+            | grep -oP '#\K\d+' | sort -n -u || true)
+
+          PRS=""
+          for num in $PR_NUMBERS; do
+            PR_DATA=$(gh pr view "$num" --repo "$REPO" \
+              --json number,title,author \
+              --jq '"\(.number)\t\(.title)\t\(.author.login)"' \
+              2>/dev/null || true)
+            if [ -n "$PR_DATA" ]; then
+              PRS="${PRS}${PR_DATA}"$'\n'
+            fi
+          done
 
           # Categorize PRs by conventional commit prefix
           BREAKING=""
