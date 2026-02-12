@@ -111,18 +111,27 @@ jobs:
           REPO="${{ github.repository }}"
           COUNT=$(echo "$MAINTAINERS" | wc -l)
 
+          # Build changelog context
+          if [ -n "$PREV_TAG" ]; then
+            CHANGES_HEADER="The changes compared to \`${PREV_TAG}\` include:"
+            CHANGELOG_LINK="See [the full changelog](https://github.com/${REPO}/compare/${PREV_TAG}...${COMMIT_SHA}) for more details."
+          else
+            CHANGES_HEADER="The changes in this release include:"
+            CHANGELOG_LINK=""
+          fi
+
           BODY=$(cat <<ISSUE_BODY
-          At least 2 approvals are needed from the ${COUNT} maintainers for tagging ${COMMIT_SHA} as \`${TAG_NAME}\`.
+At least 2 approvals are needed from the ${COUNT} maintainers for tagging ${COMMIT_SHA} as \`${TAG_NAME}\`.
 
-          ${MAINTAINERS}
+${MAINTAINERS}
 
-          The changes compared to \`${PREV_TAG}\` include:
+${CHANGES_HEADER}
 
-          ${PR_LIST}
+${PR_LIST}
 
-          See [the full changelog](https://github.com/${REPO}/compare/${PREV_TAG}...${COMMIT_SHA}) for more details.
-          Please respond LGTM or REJECT (with reasoning).
-          ISSUE_BODY
+${CHANGELOG_LINK}
+Please respond LGTM or REJECT (with reasoning).
+ISSUE_BODY
           )
 
           gh issue create \

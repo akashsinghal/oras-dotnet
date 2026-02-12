@@ -35,7 +35,7 @@ jobs:
         run: |
           # Get the tag before the current one
           PREV_TAG=$(git tag --sort=-v:refname \
-            | grep -Fv "${GITHUB_REF_NAME}" | head -n 1)
+            | grep -xFv "${GITHUB_REF_NAME}" | head -n 1)
           echo "tag=$PREV_TAG" >> "$GITHUB_OUTPUT"
 
       - name: Generate release notes
