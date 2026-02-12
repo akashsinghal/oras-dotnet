@@ -77,24 +77,11 @@ jobs:
         run: |
           PREV_TAG="${{ steps.prev_tag.outputs.tag }}"
           COMMIT_SHA="${{ steps.resolve.outputs.sha }}"
-          REPO="${{ github.repository }}"
 
-          # List merged PRs between previous tag and target commit
-          # using GitHub API for accurate PR numbers
-          PR_NUMBERS=$(gh pr list \
-            --repo "$REPO" \
-            --state merged \
-            --search "merged:>=$(git log -1 \
-              --format=%aI "$PREV_TAG")" \
-            --json number --jq '.[].number' \
-            | sort -n || true)
-
-          # Fall back to git log if API returns nothing
-          if [ -z "$PR_NUMBERS" ]; then
-            PR_NUMBERS=$(git log --oneline \
-              "$PREV_TAG..$COMMIT_SHA" \
-              | grep -oP '#\K\d+' | sort -n -u || true)
-          fi
+          # Extract PR numbers from commit messages in the range
+          PR_NUMBERS=$(git log --oneline \
+            "$PREV_TAG..$COMMIT_SHA" \
+            | grep -oP '#\K\d+' | sort -n -u || true)
 
           # Format as markdown list with linked PR references
           {

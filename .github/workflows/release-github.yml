@@ -48,24 +48,21 @@ jobs:
           REPO="${{ github.repository }}"
           VERSION="${TAG_NAME#v}"
 
-          # Collect merged PR data between tags
-          PRS=$(gh pr list --repo "$REPO" --state merged \
-            --search "merged:>=$(git log -1 --format=%aI "$PREV_TAG")" \
-            --json number,title,author \
-            --jq '.[] | "\(.number)\t\(.title)\t\(.author.login)"' \
-            | sort -t$'\t' -k1 -n)
+          # Extract PR numbers from commit messages between tags,
+          # then look up each PR's metadata from the upstream repo.
+          PR_NUMBERS=$(git log --oneline "$PREV_TAG..$TAG_NAME" \
+            | grep -oP '#\K\d+' | sort -n -u || true)
 
-          # Fall back to git log if no PRs found
-          if [ -z "$PRS" ]; then
-            PRS=$(git log --oneline "$PREV_TAG..$TAG_NAME" \
-              | grep -oP '#\K\d+' | sort -n -u \
-              | while read -r num; do
-                  gh pr view "$num" --repo "$REPO" \
-                    --json number,title,author \
-                    --jq '"\(.number)\t\(.title)\t\(.author.login)"' \
-                    2>/dev/null
-                done)
-          fi
+          PRS=""
+          for num in $PR_NUMBERS; do
+            PR_DATA=$(gh pr view "$num" --repo "$REPO" \
+              --json number,title,author \
+              --jq '"\(.number)\t\(.title)\t\(.author.login)"' \
+              2>/dev/null || true)
+            if [ -n "$PR_DATA" ]; then
+              PRS="${PRS}${PR_DATA}"$'\n'
+            fi
+          done
 
           # Categorize PRs by conventional commit prefix
           BREAKING=""
