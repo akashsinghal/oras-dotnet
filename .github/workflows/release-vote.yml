@@ -120,19 +120,14 @@ jobs:
             CHANGELOG_LINK=""
           fi
 
-          BODY=$(cat <<-ISSUE_BODY
-		At least 2 approvals are needed from the ${COUNT} maintainers for tagging ${COMMIT_SHA} as \`${TAG_NAME}\`.
-
-		${MAINTAINERS}
-
-		${CHANGES_HEADER}
-
-		${PR_LIST}
-
-		${CHANGELOG_LINK}
-		Please respond LGTM or REJECT (with reasoning).
-		ISSUE_BODY
-          )
+          BODY="At least 2 approvals are needed from the ${COUNT} maintainers for tagging ${COMMIT_SHA} as \`${TAG_NAME}\`."
+          BODY="${BODY}"$'\n\n'"${MAINTAINERS}"
+          BODY="${BODY}"$'\n\n'"${CHANGES_HEADER}"
+          BODY="${BODY}"$'\n\n'"${PR_LIST}"
+          if [ -n "$CHANGELOG_LINK" ]; then
+            BODY="${BODY}"$'\n\n'"${CHANGELOG_LINK}"
+          fi
+          BODY="${BODY}"$'\n'"Please respond LGTM or REJECT (with reasoning)."
 
           gh issue create \
             --repo "$REPO" \
