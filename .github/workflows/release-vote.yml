@@ -61,10 +61,12 @@ jobs:
         run: |
           # Parse MAINTAINERS.md into checkbox list
           # Format: "- Name (@handle)" -> "- [ ] Name (@handle)"
+          # Note: strip @ from handles to avoid notifying during tests
           {
             echo 'list<<EOF'
             grep -E '^\s*-\s+.+\(@.+\)' MAINTAINERS.md \
-              | sed 's/^\s*-\s*/- [ ] /'
+              | sed 's/^\s*-\s*/- [ ] /' \
+              | sed 's/@//g'
             echo 'EOF'
           } >> "$GITHUB_OUTPUT"
 
