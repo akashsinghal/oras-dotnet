@@ -35,7 +35,7 @@ jobs:
         run: |
           # Get the tag before the current one
           PREV_TAG=$(git tag --sort=-v:refname \
-            | grep -v "^${GITHUB_REF_NAME}$" | head -n 1)
+            | grep -Fv "${GITHUB_REF_NAME}" | head -n 1)
           echo "tag=$PREV_TAG" >> "$GITHUB_OUTPUT"
 
       - name: Generate release notes
@@ -51,8 +51,14 @@ jobs:
           # Extract PR numbers from commit messages, then look up
           # each PR's metadata via the GitHub API. Falls back to
           # commit message parsing if the API lookup fails.
-          PR_NUMBERS=$(git log --oneline "$PREV_TAG..$TAG_NAME" \
-            | grep -oP '#\K\d+' | sort -n -u || true)
+          if [ -n "$PREV_TAG" ]; then
+            PR_NUMBERS=$(git log --oneline "$PREV_TAG..$TAG_NAME" \
+              | grep -oP '#\K\d+' | sort -n -u || true)
+          else
+            # First release: include all commits
+            PR_NUMBERS=$(git log --oneline "$TAG_NAME" \
+              | grep -oP '#\K\d+' | sort -n -u || true)
+          fi
 
           # Build a map of PR numbers to commit message data
           # for fallback when API lookup fails.
@@ -61,8 +67,11 @@ jobs:
             if [[ "$line" =~ \#([0-9]+)\) ]]; then
               COMMIT_MAP["${BASH_REMATCH[1]}"]="$line"
             fi
-          done < <(git log --format="%s%x09%an" \
-            "$PREV_TAG..$TAG_NAME")
+          done < <(if [ -n "$PREV_TAG" ]; then
+            git log --format="%s%x09%an" "$PREV_TAG..$TAG_NAME"
+          else
+            git log --format="%s%x09%an" "$TAG_NAME"
+          fi)
 
           PRS=""
           for num in $PR_NUMBERS; do
@@ -105,10 +114,10 @@ jobs:
               *!:*|*"BREAKING"*)
                 BREAKING="${BREAKING}${entry}"$'\n'
                 ;;
-              feat:*|feat\(*) 
+              feat:*|feat\(*\):*)
                 FEATURES="${FEATURES}${entry}"$'\n'
                 ;;
-              fix:*|fix\(*)
+              fix:*|fix\(*\):*)
                 FIXES="${FIXES}${entry}"$'\n'
                 ;;
               *)
@@ -138,8 +147,10 @@ jobs:
           fi
 
           NOTES="${NOTES}"$'\n'"## Detailed Commits"$'\n\n'"${COMMITS}"
-          CHANGELOG="https://github.com/${REPO}/compare/${PREV_TAG}...${TAG_NAME}"
-          NOTES="${NOTES}"$'\n'"**Full Changelog**: [${PREV_TAG}...${TAG_NAME}](${CHANGELOG})"
+          if [ -n "$PREV_TAG" ]; then
+            CHANGELOG="https://github.com/${REPO}/compare/${PREV_TAG}...${TAG_NAME}"
+            NOTES="${NOTES}"$'\n'"**Full Changelog**: [${PREV_TAG}...${TAG_NAME}](${CHANGELOG})"
+          fi
 
           # Write notes to file for gh release
           echo "$NOTES" > release-notes.md

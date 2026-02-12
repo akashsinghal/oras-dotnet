@@ -78,10 +78,15 @@ jobs:
           PREV_TAG="${{ steps.prev_tag.outputs.tag }}"
           COMMIT_SHA="${{ steps.resolve.outputs.sha }}"
 
-          # Extract PR numbers from commit messages in the range
-          PR_NUMBERS=$(git log --oneline \
-            "$PREV_TAG..$COMMIT_SHA" \
-            | grep -oP '#\K\d+' | sort -n -u || true)
+          if [ -n "$PREV_TAG" ]; then
+            PR_NUMBERS=$(git log --oneline \
+              "$PREV_TAG..$COMMIT_SHA" \
+              | grep -oP '#\K\d+' | sort -n -u || true)
+          else
+            # First release: include all commits
+            PR_NUMBERS=$(git log --oneline "$COMMIT_SHA" \
+              | grep -oP '#\K\d+' | sort -n -u || true)
+          fi
 
           # Format as markdown list with linked PR references
           {
