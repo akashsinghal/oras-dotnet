@@ -38,12 +38,94 @@ jobs:
             | grep -v "^${GITHUB_REF_NAME}$" | head -n 1)
           echo "tag=$PREV_TAG" >> "$GITHUB_OUTPUT"
 
-      - name: Create GitHub Release
+      - name: Generate release notes
+        id: notes
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TAG_NAME="${GITHUB_REF_NAME}"
           PREV_TAG="${{ steps.prev_tag.outputs.tag }}"
+          REPO="${{ github.repository }}"
+          VERSION="${TAG_NAME#v}"
+
+          # Collect merged PR data between tags
+          PRS=$(gh pr list --repo "$REPO" --state merged \
+            --search "merged:>=$(git log -1 --format=%aI "$PREV_TAG")" \
+            --json number,title,author \
+            --jq '.[] | "\(.number)\t\(.title)\t\(.author.login)"' \
+            | sort -t$'\t' -k1 -n)
+
+          # Fall back to git log if no PRs found
+          if [ -z "$PRS" ]; then
+            PRS=$(git log --oneline "$PREV_TAG..$TAG_NAME" \
+              | grep -oP '#\K\d+' | sort -n -u \
+              | while read -r num; do
+                  gh pr view "$num" --repo "$REPO" \
+                    --json number,title,author \
+                    --jq '"\(.number)\t\(.title)\t\(.author.login)"' \
+                    2>/dev/null
+                done)
+          fi
+
+          # Categorize PRs by conventional commit prefix
+          BREAKING=""
+          FEATURES=""
+          FIXES=""
+          OTHER=""
+          COMMITS=""
+
+          while IFS=$'\t' read -r num title author; do
+            [ -z "$num" ] && continue
+            entry="* ${title} by @${author} in #${num}"
+
+            case "$title" in
+              *!:*|*"BREAKING"*)
+                BREAKING="${BREAKING}${entry}"$'\n'
+                ;;
+              feat:*|feat\(*) 
+                FEATURES="${FEATURES}${entry}"$'\n'
+                ;;
+              fix:*|fix\(*)
+                FIXES="${FIXES}${entry}"$'\n'
+                ;;
+              *)
+                OTHER="${OTHER}${entry}"$'\n'
+                ;;
+            esac
+
+            COMMITS="${COMMITS}${entry}"$'\n'
+          done <<< "$PRS"
+
+          # Build release notes
+          NUGET_URL="https://www.nuget.org/packages/OrasProject.Oras/${VERSION}"
+          NOTES="The NuGet package is available at [nuget.org](${NUGET_URL})."
+          NOTES="${NOTES}"$'\n'
+
+          if [ -n "$BREAKING" ]; then
+            NOTES="${NOTES}"$'\n'"## Breaking Changes"$'\n\n'"${BREAKING}"
+          fi
+          if [ -n "$FEATURES" ]; then
+            NOTES="${NOTES}"$'\n'"## New Features"$'\n\n'"${FEATURES}"
+          fi
+          if [ -n "$FIXES" ]; then
+            NOTES="${NOTES}"$'\n'"## Bug Fixes"$'\n\n'"${FIXES}"
+          fi
+          if [ -n "$OTHER" ]; then
+            NOTES="${NOTES}"$'\n'"## Other Changes"$'\n\n'"${OTHER}"
+          fi
+
+          NOTES="${NOTES}"$'\n'"## Detailed Commits"$'\n\n'"${COMMITS}"
+          CHANGELOG="https://github.com/${REPO}/compare/${PREV_TAG}...${TAG_NAME}"
+          NOTES="${NOTES}"$'\n'"**Full Changelog**: [${PREV_TAG}...${TAG_NAME}](${CHANGELOG})"
+
+          # Write notes to file for gh release
+          echo "$NOTES" > release-notes.md
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG_NAME="${GITHUB_REF_NAME}"
 
           # Determine if this is a pre-release
           PRERELEASE_FLAG=""
@@ -54,7 +136,6 @@ jobs:
           gh release create "$TAG_NAME" \
             --repo "${{ github.repository }}" \
             --title "$TAG_NAME" \
-            --generate-notes \
-            --notes-start-tag "$PREV_TAG" \
+            --notes-file release-notes.md \
             --draft \
             $PRERELEASE_FLAG
