@@ -80,7 +80,8 @@ jobs:
                 | sed -E "s/ *\(#${num}\)\t.*$//" )
               AUTHOR=$(echo "$RAW" \
                 | sed -E 's/^.*\t//')
-              PRS="${PRS}${num}\t${TITLE}\t~${AUTHOR}"$'\n'
+              PRS="${PRS}$(printf '%s\t%s\t~%s' \
+                "$num" "$TITLE" "$AUTHOR")"$'\n'
             fi
           done
 
