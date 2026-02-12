@@ -49,9 +49,20 @@ jobs:
           VERSION="${TAG_NAME#v}"
 
           # Extract PR numbers from commit messages, then look up
-          # each PR's metadata via the GitHub API.
+          # each PR's metadata via the GitHub API. Falls back to
+          # commit message parsing if the API lookup fails.
           PR_NUMBERS=$(git log --oneline "$PREV_TAG..$TAG_NAME" \
             | grep -oP '#\K\d+' | sort -n -u || true)
+
+          # Build a map of PR numbers to commit message data
+          # for fallback when API lookup fails.
+          declare -A COMMIT_MAP
+          while IFS= read -r line; do
+            if [[ "$line" =~ \#([0-9]+)\) ]]; then
+              COMMIT_MAP["${BASH_REMATCH[1]}"]="$line"
+            fi
+          done < <(git log --format="%s%x09%an" \
+            "$PREV_TAG..$TAG_NAME")
 
           PRS=""
           for num in $PR_NUMBERS; do
@@ -61,6 +72,15 @@ jobs:
               2>/dev/null || true)
             if [ -n "$PR_DATA" ]; then
               PRS="${PRS}${PR_DATA}"$'\n'
+            elif [ -n "${COMMIT_MAP[$num]:-}" ]; then
+              # Fallback: parse title and author from commit msg.
+              # Author is plain text (no @) to avoid wrong tags.
+              RAW="${COMMIT_MAP[$num]}"
+              TITLE=$(echo "$RAW" \
+                | sed -E "s/ *\(#${num}\)\t.*$//" )
+              AUTHOR=$(echo "$RAW" \
+                | sed -E 's/^.*\t//')
+              PRS="${PRS}${num}\t${TITLE}\t~${AUTHOR}"$'\n'
             fi
           done
 
@@ -73,7 +93,12 @@ jobs:
 
           while IFS=$'\t' read -r num title author; do
             [ -z "$num" ] && continue
-            entry="* ${title} by @${author} in #${num}"
+            # Fallback authors are prefixed with ~ (no @ tag)
+            if [[ "$author" == ~* ]]; then
+              entry="* ${title} by ${author#\~} in #${num}"
+            else
+              entry="* ${title} by @${author} in #${num}"
+            fi
 
             case "$title" in
               *!:*|*"BREAKING"*)
