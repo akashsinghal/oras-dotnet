@@ -126,7 +126,7 @@ public sealed class ColdReDeriveAuthChallengeHandler : IAuthChallengeHandler
                 return new AuthChallengeResolution
                 {
                     Scheme = Challenge.Scheme.Basic,
-                    Token = await context.FetchBasicTokenAsync(cancellationToken),
+                    Token = (await context.FetchBasicTokenAsync(cancellationToken)).Token,
                     CacheScopeKey = string.Empty,
                 };
 
@@ -144,8 +144,8 @@ public sealed class ColdReDeriveAuthChallengeHandler : IAuthChallengeHandler
                 return new AuthChallengeResolution
                 {
                     Scheme = Challenge.Scheme.Bearer,
-                    Token = await context.FetchBearerTokenAsync(
-                        realm, service ?? string.Empty, scopes, cancellationToken),
+                    Token = (await context.FetchBearerTokenAsync(
+                        realm, service ?? string.Empty, scopes, cancellationToken)).Token,
                     CacheScopeKey = cacheKey,
                 };
 
