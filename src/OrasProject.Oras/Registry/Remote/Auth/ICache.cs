@@ -11,6 +11,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using System;
+
 namespace OrasProject.Oras.Registry.Remote.Auth;
 
 public interface ICache
@@ -34,7 +36,7 @@ public interface ICache
     bool TryGetScheme(string registry, out Challenge.Scheme scheme, string? partitionId = null);
 
     /// <summary>
-    /// SetCache sets or updates the cache for a specific registry and authentication scheme.
+    /// SetCache sets or updates the cache for a specific registry, authentication scheme, and scope.
     /// </summary>
     /// <param name="registry">The registry host (e.g., "docker.io").</param>
     /// <param name="scheme">The authentication scheme associated with the cache entry.</param>
@@ -42,6 +44,10 @@ public interface ICache
     /// The OAuth2 scope key used to identify the token within the cache entry.
     /// </param>
     /// <param name="token">The token to be stored in the cache.</param>
+    /// <param name="expiresAt">
+    /// The absolute instant at which the token should expire and be evicted, or <c>null</c> for a
+    /// token that does not expire on a timer (e.g., a Basic credential).
+    /// </param>
     /// <param name="partitionId">
     /// Optional cache partition identifier. When provided, tokens are isolated by this ID,
     /// enabling multi-partition scenarios where different credentials are used for the same registry.
@@ -51,6 +57,7 @@ public interface ICache
         Challenge.Scheme scheme,
         string scopeKey,
         string token,
+        DateTimeOffset? expiresAt = null,
         string? partitionId = null);
 
     /// <summary>

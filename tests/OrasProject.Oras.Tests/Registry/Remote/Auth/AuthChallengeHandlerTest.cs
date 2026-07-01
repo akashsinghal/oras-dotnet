@@ -256,7 +256,7 @@ public class AuthChallengeHandlerTest
             return new AuthChallengeResolution
             {
                 Scheme = Challenge.Scheme.Bearer,
-                Token = token,
+                Token = token.Token,
                 CacheScopeKey = cacheKey,
             };
         }

@@ -160,9 +160,9 @@ public class MultiTenantAuthCacheExamples
 
         // Set tokens for different customers
         cache.SetCache(
-            registry, Challenge.Scheme.Bearer, scopeKey, "token-for-customer-A", "customer-A");
+            registry, Challenge.Scheme.Bearer, scopeKey, "token-for-customer-A", partitionId: "customer-A");
         cache.SetCache(
-            registry, Challenge.Scheme.Bearer, scopeKey, "token-for-customer-B", "customer-B");
+            registry, Challenge.Scheme.Bearer, scopeKey, "token-for-customer-B", partitionId: "customer-B");
 
         // Each customer has isolated token cache
         cache.TryGetToken(

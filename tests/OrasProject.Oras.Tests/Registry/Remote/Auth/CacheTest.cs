@@ -409,8 +409,8 @@ public class CacheTest
         var key = "repository:library/nginx:pull";
 
         // Act - Set tokens for two different cache partitions
-        cache.SetCache(registry, scheme, key, "customer1-token", "customer1");
-        cache.SetCache(registry, scheme, key, "customer2-token", "customer2");
+        cache.SetCache(registry, scheme, key, "customer1-token", partitionId: "customer1");
+        cache.SetCache(registry, scheme, key, "customer2-token", partitionId: "customer2");
 
         // Assert - Each partition should have its own token
         Assert.True(cache.TryGetToken(registry, scheme, key, out var token1, "customer1"));
@@ -442,5 +442,89 @@ public class CacheTest
 
         // With different partitionId, should not find the token
         Assert.False(cache.TryGetToken(registry, scheme, key, out _, "customer1"));
+    }
+
+    [Fact]
+    public void SetCache_WithExpiresAt_TokenExpiresAfterDeadline()
+    {
+        // Arrange
+        var cache = new Cache(new MemoryCache(new MemoryCacheOptions()));
+        var registry = "test.registry";
+        var scheme = Challenge.Scheme.Bearer;
+        var key = "testKey";
+        var token = "testToken";
+
+        // Act — cache with a short absolute expiry supplied by the caller.
+        cache.SetCache(registry, scheme, key, token, expiresAt: DateTimeOffset.UtcNow.AddMilliseconds(300));
+
+        // Token is initially retrievable.
+        Assert.True(cache.TryGetToken(registry, scheme, key, out var retrieved));
+        Assert.Equal(token, retrieved);
+
+        // Wait past the deadline (with buffer).
+        Thread.Sleep(500);
+
+        var expired = false;
+        for (var i = 0; i < 3; i++)
+        {
+            if (!cache.TryGetToken(registry, scheme, key, out _))
+            {
+                expired = true;
+                break;
+            }
+            Thread.Sleep(100);
+        }
+
+        // Assert
+        Assert.True(expired, "Token should expire after its expiresAt deadline");
+    }
+
+    [Fact]
+    public void SetCache_WithExpiresAt_SchemeSurvivesTokenExpiry()
+    {
+        // Arrange
+        var cache = new Cache(new MemoryCache(new MemoryCacheOptions()));
+        var registry = "test.registry";
+        var scheme = Challenge.Scheme.Bearer;
+        var key = "testKey";
+
+        // Act
+        cache.SetCache(registry, scheme, key, "tok", expiresAt: DateTimeOffset.UtcNow.AddMilliseconds(300));
+        Thread.Sleep(500);
+
+        var tokenExpired = false;
+        for (var i = 0; i < 3; i++)
+        {
+            if (!cache.TryGetToken(registry, scheme, key, out _))
+            {
+                tokenExpired = true;
+                break;
+            }
+            Thread.Sleep(100);
+        }
+
+        // Assert — the token expired but the scheme entry is still cached.
+        Assert.True(tokenExpired, "Token should have expired");
+        Assert.True(cache.TryGetScheme(registry, out var cachedScheme), "Scheme should survive token expiry");
+        Assert.Equal(scheme, cachedScheme);
+    }
+
+    [Fact]
+    public void SetCache_WithNullExpiresAt_TokenHasNoTimedExpiry()
+    {
+        // Arrange
+        var cache = new Cache(new MemoryCache(new MemoryCacheOptions()));
+        var registry = "test.registry";
+        var scheme = Challenge.Scheme.Basic;
+        var key = "";
+        var token = "basic-token";
+
+        // Act — no expiry supplied (e.g., a Basic credential).
+        cache.SetCache(registry, scheme, key, token, expiresAt: null);
+        Thread.Sleep(200);
+
+        // Assert — still present; it is not evicted on a timer.
+        Assert.True(cache.TryGetToken(registry, scheme, key, out var retrieved));
+        Assert.Equal(token, retrieved);
     }
 }

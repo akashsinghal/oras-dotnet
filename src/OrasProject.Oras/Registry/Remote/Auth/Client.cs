@@ -15,6 +15,7 @@ using Microsoft.Extensions.Caching.Memory;
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Net;
@@ -240,6 +241,19 @@ public class Client : IClient
     public bool ForceAttemptOAuth2 { get; set; }
 
     /// <summary>
+    /// The default time-to-live applied to a cached token when neither the token response
+    /// (<c>expires_in</c>) nor the token's JWT <c>exp</c> claim provides a usable expiry.
+    /// Defaults to 5 minutes.
+    /// </summary>
+    public TimeSpan DefaultTokenExpiry { get; set; } = TimeSpan.FromMinutes(5);
+
+    /// <summary>
+    /// Clock used for token-expiry calculations. Overridable for testing; defaults to
+    /// <see cref="System.TimeProvider.System"/>.
+    /// </summary>
+    internal TimeProvider TimeProvider { get; set; } = TimeProvider.System;
+
+    /// <summary>
     /// defaultClientID specifies the default client ID used in OAuth2.
     /// </summary>
     private const string _defaultClientId = "oras-dotnet";
@@ -435,7 +449,7 @@ public class Client : IClient
     /// <exception cref="AuthenticationException">
     /// Thrown when credentials are missing or invalid.
     /// </exception>
-    internal async Task<string> FetchBearerAuthAsync(
+    internal async Task<TokenResult> FetchBearerAuthAsync(
         string registry,
         string realm,
         string service,
@@ -461,7 +475,7 @@ public class Client : IClient
                 .ConfigureAwait(false);
             if (!string.IsNullOrWhiteSpace(accessToken))
             {
-                return accessToken;
+                return new TokenResult(accessToken, null);
             }
         }
 
@@ -469,7 +483,7 @@ public class Client : IClient
             .ConfigureAwait(false);
         if (!string.IsNullOrEmpty(credential.AccessToken))
         {
-            return credential.AccessToken;
+            return new TokenResult(credential.AccessToken, null);
         }
         if (credential.IsEmpty() ||
             (string.IsNullOrWhiteSpace(credential.RefreshToken) && !ForceAttemptOAuth2))
@@ -505,7 +519,8 @@ public class Client : IClient
     /// <param name="password">The password for basic authentication (optional).</param>
     /// <param name="cancellationToken">A token to monitor for cancellation requests.</param>
     /// <returns>
-    /// A task that represents the asynchronous operation. The task result contains the fetched token as a string.
+    /// A task that represents the asynchronous operation. The task result contains the fetched token
+    /// and its server-declared expiry, when present.
     /// </returns>
     /// <exception cref="AuthenticationException">
     /// Thrown when both "access_token" and "token" are missing or empty in the response.
@@ -513,7 +528,7 @@ public class Client : IClient
     /// <exception cref="HttpRequestException">
     /// Thrown when the HTTP request fails or the response status code is not OK.
     /// </exception>
-    internal async Task<string> FetchDistributionTokenAsync(
+    internal async Task<TokenResult> FetchDistributionTokenAsync(
         string realm,
         string service,
         IList<string> scopes,
@@ -558,14 +573,16 @@ public class Client : IClient
         using var doc = JsonDocument.Parse(responseBody);
         var root = doc.RootElement;
 
+        var expiresAt = ParseServerExpiry(root);
+
         if (root.TryGetProperty("access_token", out var accessToken) && !string.IsNullOrWhiteSpace(accessToken.GetString()))
         {
-            return accessToken.GetString()!;
+            return new TokenResult(accessToken.GetString()!, expiresAt);
         }
 
         if (root.TryGetProperty("token", out var token) && !string.IsNullOrWhiteSpace(token.GetString()))
         {
-            return token.GetString()!;
+            return new TokenResult(token.GetString()!, expiresAt);
         }
 
         throw new AuthenticationException("Both AccessToken and Token are empty or missing");
@@ -586,7 +603,7 @@ public class Client : IClient
     /// <exception cref="HttpRequestException">
     /// Thrown when there is an issue with the HTTP request or response.
     /// </exception>
-    internal async Task<string> FetchOauth2TokenAsync(
+    internal async Task<TokenResult> FetchOauth2TokenAsync(
         string realm,
         string service,
         IList<string> scopes,
@@ -640,10 +657,100 @@ public class Client : IClient
         var root = doc.RootElement;
         if (root.TryGetProperty("access_token", out var accessToken) && !string.IsNullOrEmpty(accessToken.ToString()))
         {
-            return accessToken.ToString();
+            return new TokenResult(accessToken.ToString(), ParseServerExpiry(root));
         }
 
         throw new AuthenticationException("AccessToken is empty or missing");
+    }
+
+    /// <summary>
+    /// Computes the server-declared token expiry from a token endpoint response using the
+    /// <c>expires_in</c> (seconds) and optional <c>issued_at</c> (RFC 3339) fields, per the
+    /// distribution token specification. Returns <c>null</c> when no usable <c>expires_in</c> is present.
+    /// </summary>
+    private DateTimeOffset? ParseServerExpiry(JsonElement root)
+    {
+        if (!root.TryGetProperty("expires_in", out var expiresInElement))
+        {
+            return null;
+        }
+
+        int expiresInSeconds;
+        switch (expiresInElement.ValueKind)
+        {
+            case JsonValueKind.Number when expiresInElement.TryGetInt32(out var number):
+                expiresInSeconds = number;
+                break;
+            case JsonValueKind.String when int.TryParse(
+                expiresInElement.GetString(),
+                NumberStyles.Integer,
+                CultureInfo.InvariantCulture,
+                out var parsed):
+                expiresInSeconds = parsed;
+                break;
+            default:
+                return null;
+        }
+
+        if (expiresInSeconds <= 0)
+        {
+            return null;
+        }
+
+        var issuedAt = TimeProvider.GetUtcNow();
+        if (root.TryGetProperty("issued_at", out var issuedAtElement) &&
+            issuedAtElement.ValueKind == JsonValueKind.String &&
+            DateTimeOffset.TryParse(
+                issuedAtElement.GetString(),
+                CultureInfo.InvariantCulture,
+                DateTimeStyles.RoundtripKind,
+                out var parsedIssuedAt))
+        {
+            issuedAt = parsedIssuedAt;
+        }
+
+        return issuedAt.AddSeconds(expiresInSeconds);
+    }
+
+    /// <summary>
+    /// Caches the token produced for an authentication challenge, resolving its expiry from the
+    /// server-declared value, the token's JWT <c>exp</c> claim, or <see cref="DefaultTokenExpiry"/>.
+    /// Basic credentials are cached without a timed expiry; a token that resolves to an already-past
+    /// expiry is not cached.
+    /// </summary>
+    private void CacheResolvedToken(string host, AuthChallengeResolution resolution, string? partitionId)
+    {
+        if (resolution.Scheme == Challenge.Scheme.Basic)
+        {
+            Cache.SetCache(
+                host,
+                resolution.Scheme,
+                resolution.CacheScopeKey,
+                resolution.Token,
+                expiresAt: null,
+                partitionId);
+            return;
+        }
+
+        var expiresAt = TokenExpiry.Resolve(
+            resolution.Token,
+            resolution.ExpiresAt,
+            TimeProvider,
+            DefaultTokenExpiry);
+
+        if (expiresAt <= TimeProvider.GetUtcNow())
+        {
+            // Token is already expired; caching it would be a guaranteed miss.
+            return;
+        }
+
+        Cache.SetCache(
+            host,
+            resolution.Scheme,
+            resolution.CacheScopeKey,
+            resolution.Token,
+            expiresAt,
+            partitionId);
     }
 
     /// <summary>
@@ -805,7 +912,7 @@ public class Client : IClient
 
             if (resolution.Cache)
             {
-                Cache.SetCache(host, resolution.Scheme, resolution.CacheScopeKey, resolution.Token, partitionId);
+                CacheResolvedToken(host, resolution, partitionId);
             }
 
             var schemeName = resolution.Scheme == Challenge.Scheme.Basic ? "Basic" : "Bearer";

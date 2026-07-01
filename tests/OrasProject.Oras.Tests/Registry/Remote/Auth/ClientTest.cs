@@ -182,7 +182,7 @@ public class ClientTest
             cancellationToken);
 
         // Assert
-        Assert.Equal(expectedToken, result);
+        Assert.Equal(expectedToken, result.Token);
     }
 
     [Fact]
@@ -245,7 +245,7 @@ public class ClientTest
             cancellationToken);
 
         // Assert
-        Assert.Equal("test_access_token", result);
+        Assert.Equal("test_access_token", result.Token);
     }
 
     [Fact]
@@ -395,7 +395,7 @@ public class ClientTest
             CancellationToken.None);
 
         // Assert
-        Assert.Equal(expectedToken, result);
+        Assert.Equal(expectedToken, result.Token);
     }
 
     [Fact]
@@ -449,7 +449,7 @@ public class ClientTest
             CancellationToken.None);
 
         // Assert
-        Assert.Equal(expectedToken, result);
+        Assert.Equal(expectedToken, result.Token);
     }
 
     [Fact]
@@ -566,7 +566,7 @@ public class ClientTest
             CancellationToken.None);
 
         // Assert
-        Assert.Equal("test_access_token", result);
+        Assert.Equal("test_access_token", result.Token);
 
         // with only username
         result = await client.FetchDistributionTokenAsync(
@@ -578,7 +578,7 @@ public class ClientTest
             CancellationToken.None);
 
         // Assert
-        Assert.Equal("test_access_token", result);
+        Assert.Equal("test_access_token", result.Token);
 
         // with only password
         result = await client.FetchDistributionTokenAsync(
@@ -590,7 +590,7 @@ public class ClientTest
             CancellationToken.None);
 
         // Assert
-        Assert.Equal("test_access_token", result);
+        Assert.Equal("test_access_token", result.Token);
     }
 
     [Fact]
@@ -2252,7 +2252,7 @@ public class ClientTest
             registry, realm, service, scopes, false, CancellationToken.None);
 
         // Assert
-        Assert.Equal(expectedToken, result);
+        Assert.Equal(expectedToken, result.Token);
         mockProvider.Verify(
             p => p.ResolveAccessTokenAsync(
                 registry, realm, service,
@@ -2297,7 +2297,7 @@ public class ClientTest
             registry, realm, service, scopes, false, CancellationToken.None);
 
         // Assert — fell through to credential-based auth
-        Assert.Equal(expectedToken, result);
+        Assert.Equal(expectedToken, result.Token);
         mockProvider.Verify(
             p => p.ResolveAccessTokenAsync(
                 registry, realm, service,
@@ -2350,7 +2350,7 @@ public class ClientTest
             registry, realm, service, scopes, false, CancellationToken.None);
 
         // Assert — whitespace/empty triggers fallthrough
-        Assert.Equal(expectedToken, result);
+        Assert.Equal(expectedToken, result.Token);
         mockCredentialProvider.Verify(
             p => p.ResolveCredentialAsync(
                 registry, It.IsAny<CancellationToken>()),
@@ -2400,7 +2400,7 @@ public class ClientTest
             registry, realm, service, scopes, false, CancellationToken.None);
 
         // Assert — credential provider was never consulted
-        Assert.Equal(expectedToken, result);
+        Assert.Equal(expectedToken, result.Token);
         mockCredentialProvider.Verify(
             p => p.ResolveCredentialAsync(
                 It.IsAny<string>(), It.IsAny<CancellationToken>()),
@@ -2734,5 +2734,91 @@ public class ClientTest
             () => client.SendAsync(request,
                 cancellationToken: CancellationToken.None));
         Assert.Contains("not allowed", ex.Message);
+    }
+
+    [Fact]
+    public async Task FetchDistributionToken_WithExpiresIn_SetsExpiresAtFromClock()
+    {
+        // Arrange
+        var realm = "https://example.registry/token";
+        var service = "test_service";
+        var scopes = new List<string> { "repository:repo:pull" };
+        var now = new DateTimeOffset(2024, 1, 1, 0, 0, 0, TimeSpan.Zero);
+
+        HttpResponseMessage MockHttpRequestHandler(HttpRequestMessage req, CancellationToken ct = default)
+            => new(HttpStatusCode.OK)
+            {
+                Content = new StringContent("{\"access_token\":\"tok\",\"expires_in\":600}"),
+                RequestMessage = req
+            };
+
+        var client = new Client(new HttpClient(CustomHandler(MockHttpRequestHandler).Object))
+        {
+            TimeProvider = new FixedTimeProvider(now)
+        };
+
+        // Act
+        var result = await client.FetchDistributionTokenAsync(
+            realm, service, scopes, null, null, CancellationToken.None);
+
+        // Assert — expires_at = now + expires_in (no issued_at supplied).
+        Assert.Equal("tok", result.Token);
+        Assert.Equal(now.AddSeconds(600), result.ExpiresAt);
+    }
+
+    [Fact]
+    public async Task FetchDistributionToken_WithIssuedAt_ComputesExpiresAtFromIssuedAt()
+    {
+        // Arrange
+        var realm = "https://example.registry/token";
+        var service = "test_service";
+        var scopes = new List<string> { "repository:repo:pull" };
+        var issuedAt = new DateTimeOffset(2024, 6, 1, 12, 0, 0, TimeSpan.Zero);
+
+        HttpResponseMessage MockHttpRequestHandler(HttpRequestMessage req, CancellationToken ct = default)
+            => new(HttpStatusCode.OK)
+            {
+                Content = new StringContent(
+                    "{\"access_token\":\"tok\",\"expires_in\":600,\"issued_at\":\"2024-06-01T12:00:00Z\"}"),
+                RequestMessage = req
+            };
+
+        var client = new Client(new HttpClient(CustomHandler(MockHttpRequestHandler).Object))
+        {
+            // A far-off clock proves issued_at (not the clock) is used when present.
+            TimeProvider = new FixedTimeProvider(new DateTimeOffset(2030, 1, 1, 0, 0, 0, TimeSpan.Zero))
+        };
+
+        // Act
+        var result = await client.FetchDistributionTokenAsync(
+            realm, service, scopes, null, null, CancellationToken.None);
+
+        // Assert — expires_at = issued_at + expires_in.
+        Assert.Equal(issuedAt.AddSeconds(600), result.ExpiresAt);
+    }
+
+    [Fact]
+    public async Task FetchDistributionToken_WithoutExpiresIn_ExpiresAtIsNull()
+    {
+        // Arrange
+        var realm = "https://example.registry/token";
+        var service = "test_service";
+        var scopes = new List<string> { "repository:repo:pull" };
+
+        HttpResponseMessage MockHttpRequestHandler(HttpRequestMessage req, CancellationToken ct = default)
+            => new(HttpStatusCode.OK)
+            {
+                Content = new StringContent("{\"access_token\":\"tok\"}"),
+                RequestMessage = req
+            };
+
+        var client = new Client(new HttpClient(CustomHandler(MockHttpRequestHandler).Object));
+
+        // Act
+        var result = await client.FetchDistributionTokenAsync(
+            realm, service, scopes, null, null, CancellationToken.None);
+
+        // Assert — no server-declared expiry.
+        Assert.Null(result.ExpiresAt);
     }
 }

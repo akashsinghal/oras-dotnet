@@ -11,6 +11,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using System;
+
 namespace OrasProject.Oras.Registry.Remote.Auth;
 
 /// <summary>
@@ -51,4 +53,12 @@ public sealed class AuthChallengeResolution
     /// requests. Defaults to <c>true</c>.
     /// </summary>
     public bool Cache { get; init; } = true;
+
+    /// <summary>
+    /// The server-declared absolute expiry of <see cref="Token"/> (derived from the token
+    /// response's <c>expires_in</c>/<c>issued_at</c>), or <c>null</c> when the registry did not
+    /// provide one. When <c>null</c>, the client falls back to the token's JWT <c>exp</c> claim and
+    /// then a default time-to-live. Ignored for Basic tokens and when <see cref="Cache"/> is <c>false</c>.
+    /// </summary>
+    public DateTimeOffset? ExpiresAt { get; init; }
 }

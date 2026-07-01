@@ -178,8 +178,8 @@ public sealed class AuthChallengeContext
     /// <param name="service">The service identifier from the challenge.</param>
     /// <param name="scopes">The scopes to request for the token.</param>
     /// <param name="cancellationToken">A token to cancel the asynchronous operation.</param>
-    /// <returns>The fetched bearer token.</returns>
-    public Task<string> FetchBearerTokenAsync(
+    /// <returns>The fetched bearer token and its server-declared expiry, when present.</returns>
+    public Task<TokenResult> FetchBearerTokenAsync(
         string realm,
         string service,
         IReadOnlyList<string> scopes,
@@ -197,9 +197,12 @@ public sealed class AuthChallengeContext
     /// <see cref="Host"/> from the client's credential provider.
     /// </summary>
     /// <param name="cancellationToken">A token to cancel the asynchronous operation.</param>
-    /// <returns>The base64-encoded Basic credential.</returns>
-    public Task<string> FetchBasicTokenAsync(CancellationToken cancellationToken = default)
-        => _client.FetchBasicAuthAsync(Host, cancellationToken);
+    /// <returns>The base64-encoded Basic credential (Basic credentials do not expire).</returns>
+    public async Task<TokenResult> FetchBasicTokenAsync(CancellationToken cancellationToken = default)
+    {
+        var token = await _client.FetchBasicAuthAsync(Host, cancellationToken).ConfigureAwait(false);
+        return new TokenResult(token, null);
+    }
 
     /// <summary>
     /// Attempts to read a still-cached token for <see cref="Host"/> at the given scheme and

@@ -11,9 +11,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-using System.Collections.Concurrent;
 using System;
-using System.Collections.Generic;
 using Microsoft.Extensions.Caching.Memory;
 
 namespace OrasProject.Oras.Registry.Remote.Auth;
@@ -22,31 +20,20 @@ public sealed class Cache : ICache
 {
     #region private members
     /// <summary>
-    /// CacheEntry represents a cache entry for storing authentication tokens associated with a
-    /// specific challenge scheme.
-    /// </summary>
-    /// <param name="Scheme">The authentication scheme associated with the cache entry.</param>
-    /// <param name="Tokens">
-    /// A dictionary containing authentication tokens, where the key is the scopes and the value
-    /// is the token itself.
-    /// </param>
-    private sealed record CacheEntry(Challenge.Scheme Scheme, Dictionary<string, string> Tokens);
-
-    /// <summary>
     /// The underlying memory cache used to store authentication schemes and tokens.
     /// </summary>
     private readonly IMemoryCache _memoryCache;
 
     /// <summary>
-    /// Dictionary to store per-key locks to ensure thread-safety while allowing
-    /// concurrent operations on different cache keys.
+    /// Prefix for scheme cache keys to prevent collisions with other users of the same memory cache.
     /// </summary>
-    private readonly ConcurrentDictionary<string, object> _locks = new();
+    private const string _schemeKeyPrefix = "ORAS_AUTH_SCHEME_";
 
     /// <summary>
-    /// Prefix for cache keys to prevent collisions with other users of the same memory cache.
+    /// Prefix for token cache keys. Each token is stored as its own entry so the memory cache can
+    /// evict it independently the moment it expires.
     /// </summary>
-    private const string _cacheKeyPrefix = "ORAS_AUTH_";
+    private const string _tokenKeyPrefix = "ORAS_AUTH_TOKEN_";
 
     /// <summary>
     /// Default cache entry options with size=1.
@@ -58,16 +45,27 @@ public sealed class Cache : ICache
     };
 
     /// <summary>
-    /// Generates a consistent cache key from the registry and optional PartitionId.
+    /// Builds the scheme cache key for a registry (optionally partitioned).
     /// Uses pipe (|) as delimiter since it cannot appear in registry hostnames.
     /// </summary>
-    /// <param name="registry">The registry host.</param>
-    /// <param name="partitionId">Optional cache partition identifier.</param>
-    /// <returns>A prefixed cache key.</returns>
-    private static string GetCacheKey(string registry, string? partitionId) =>
+    private static string GetSchemeKey(string registry, string? partitionId) =>
         string.IsNullOrEmpty(partitionId)
-            ? $"{_cacheKeyPrefix}{registry}"
-            : $"{_cacheKeyPrefix}{partitionId}|{registry}";
+            ? $"{_schemeKeyPrefix}{registry}"
+            : $"{_schemeKeyPrefix}{partitionId}|{registry}";
+
+    /// <summary>
+    /// Builds the token cache key for a registry/scheme/scope (optionally partitioned).
+    /// The scheme is part of the key so tokens for different schemes never collide.
+    /// </summary>
+    private static string GetTokenKey(
+        string registry,
+        Challenge.Scheme scheme,
+        string scopeKey,
+        string? partitionId)
+    {
+        var partitionPrefix = string.IsNullOrEmpty(partitionId) ? string.Empty : $"{partitionId}|";
+        return $"{_tokenKeyPrefix}{partitionPrefix}{registry}|{(int)scheme}|{scopeKey}";
+    }
     #endregion
 
     /// <summary>
@@ -111,10 +109,9 @@ public sealed class Cache : ICache
     /// </returns>
     public bool TryGetScheme(string registry, out Challenge.Scheme scheme, string? partitionId = null)
     {
-        var cacheKey = GetCacheKey(registry, partitionId);
-        if (_memoryCache.TryGetValue(cacheKey, out CacheEntry? cacheEntry) && cacheEntry != null)
+        if (_memoryCache.TryGetValue(GetSchemeKey(registry, partitionId), out Challenge.Scheme cachedScheme))
         {
-            scheme = cacheEntry.Scheme;
+            scheme = cachedScheme;
             return true;
         }
 
@@ -123,33 +120,33 @@ public sealed class Cache : ICache
     }
 
     /// <summary>
-    /// Sets or updates the cache for a specific registry and authentication scheme.
+    /// Sets or updates the cache for a specific registry, authentication scheme, and scope.
     /// </summary>
     /// <param name="registry">The registry host (e.g., "docker.io").</param>
     /// <param name="scheme">The authentication scheme associated with the cache entry.</param>
     /// <param name="scopeKey">
-    /// The OAuth2 scope key used to identify the token within the cache entry.
+    /// The OAuth2 scope key used to identify the token within the cache.
     /// </param>
     /// <param name="token">The token to be stored in the cache.</param>
+    /// <param name="expiresAt">
+    /// The absolute instant at which the token entry should expire. When provided, the underlying
+    /// memory cache evicts the token automatically once this instant passes. When <c>null</c>
+    /// (e.g., for Basic credentials), the token does not expire on a timer.
+    /// </param>
     /// <param name="partitionId">
     /// Optional cache partition identifier. When provided, tokens are isolated by this ID,
     /// enabling multi-partition scenarios where different credentials are used for the same registry.
     /// </param>
     /// <remarks>
     /// <para>
-    /// If the registry already exists in the cache:
-    /// <list type="bullet">
-    /// <item>
-    /// If the provided scheme differs from the existing scheme, the cache entry is replaced with
-    /// a new one.
-    /// </item>
-    /// <item> Otherwise, the token is added or updated in the existing cache entry.</item>
-    /// </list>
+    /// The scheme is stored as its own long-lived entry, and each token is stored as a separate
+    /// entry keyed by registry, scheme, and scope. This lets the memory cache expire individual
+    /// tokens on their own schedule without dropping the scheme or other still-valid tokens.
     /// </para>
     /// <para>
-    /// This method uses the <see cref="CacheEntryOptions"/> property if set, or falls back to
-    /// the default options with size=1. Using these options ensures proper cache eviction behavior
-    /// when size limits are configured.
+    /// This method uses the <see cref="MemoryCacheEntryOptions.Size"/> from
+    /// <see cref="CacheEntryOptions"/> if set, or falls back to size=1. Setting the size ensures
+    /// proper cache eviction behavior when the underlying cache has a size limit configured.
     /// </para>
     /// </remarks>
     public void SetCache(
@@ -157,32 +154,62 @@ public sealed class Cache : ICache
         Challenge.Scheme scheme,
         string scopeKey,
         string token,
+        DateTimeOffset? expiresAt = null,
         string? partitionId = null)
     {
-        var cacheKey = GetCacheKey(registry, partitionId);
-        var lockObj = _locks.GetOrAdd(cacheKey, _ => new object());
-        // Lock for atomicity
-        lock (lockObj)
+        var entryOptions = CacheEntryOptions ?? _defaultCacheEntryOptions;
+
+        // The scheme is long-lived and lightweight; store it as a size-free entry so that token
+        // expiry never drops it (which would force a re-challenge) and it doesn't consume the
+        // caller's size budget.
+        _memoryCache.Set(
+            GetSchemeKey(registry, partitionId),
+            scheme,
+            new MemoryCacheEntryOptions { Size = 0 });
+
+        // The token entry inherits the caller's configured options (size, callbacks, sliding/absolute
+        // expiration). A supplied token expiry takes precedence over any configured absolute expiration.
+        _memoryCache.Set(
+            GetTokenKey(registry, scheme, scopeKey, partitionId),
+            token,
+            BuildTokenEntryOptions(entryOptions, expiresAt));
+    }
+
+    /// <summary>
+    /// Builds the memory cache options for a token entry by cloning the caller-configured
+    /// <see cref="CacheEntryOptions"/> and, when a token expiry is supplied, applying it as the
+    /// authoritative absolute expiration.
+    /// </summary>
+    private static MemoryCacheEntryOptions BuildTokenEntryOptions(
+        MemoryCacheEntryOptions source,
+        DateTimeOffset? expiresAt)
+    {
+        var options = new MemoryCacheEntryOptions
         {
-            if (_memoryCache.TryGetValue(cacheKey, out CacheEntry? oldEntry) &&
-                oldEntry != null &&
-                scheme == oldEntry.Scheme)
-            {
-                // When the scheme matches, update the token in the existing entry
-                oldEntry.Tokens[scopeKey] = token;
-                return;
-            }
+            Size = source.Size ?? 1,
+            Priority = source.Priority,
+            SlidingExpiration = source.SlidingExpiration,
+            AbsoluteExpiration = source.AbsoluteExpiration,
+            AbsoluteExpirationRelativeToNow = source.AbsoluteExpirationRelativeToNow,
+        };
 
-            // Otherwise, set a new entry
-            var tokens = new Dictionary<string, string>(StringComparer.Ordinal)
-            {
-                [scopeKey] = token
-            };
-            var newEntry = new CacheEntry(scheme, tokens);
-
-            var entryOptions = CacheEntryOptions ?? _defaultCacheEntryOptions;
-            _memoryCache.Set(cacheKey, newEntry, entryOptions);
+        foreach (var callback in source.PostEvictionCallbacks)
+        {
+            options.PostEvictionCallbacks.Add(callback);
         }
+
+        foreach (var expirationToken in source.ExpirationTokens)
+        {
+            options.ExpirationTokens.Add(expirationToken);
+        }
+
+        if (expiresAt.HasValue)
+        {
+            options.AbsoluteExpiration = expiresAt.Value;
+            options.AbsoluteExpirationRelativeToNow = null;
+        }
+
+        return options;
     }
 
     /// <summary>
@@ -213,11 +240,10 @@ public sealed class Cache : ICache
         out string token,
         string? partitionId = null)
     {
-        var cacheKey = GetCacheKey(registry, partitionId);
-        if (_memoryCache.TryGetValue(cacheKey, out CacheEntry? cacheEntry) &&
-            cacheEntry != null &&
-            cacheEntry.Scheme == scheme &&
-            cacheEntry.Tokens.TryGetValue(scopeKey, out var cachedToken))
+        // An expired token entry is evicted by the memory cache and read here as a miss,
+        // which causes the caller to acquire a fresh token.
+        if (_memoryCache.TryGetValue(GetTokenKey(registry, scheme, scopeKey, partitionId), out string? cachedToken) &&
+            cachedToken != null)
         {
             token = cachedToken;
             return true;

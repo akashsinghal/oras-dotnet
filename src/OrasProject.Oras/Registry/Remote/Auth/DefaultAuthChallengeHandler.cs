@@ -47,8 +47,9 @@ public sealed class DefaultAuthChallengeHandler : IAuthChallengeHandler
                     return new AuthChallengeResolution
                     {
                         Scheme = Challenge.Scheme.Basic,
-                        Token = basicToken,
+                        Token = basicToken.Token,
                         CacheScopeKey = string.Empty,
+                        ExpiresAt = basicToken.ExpiresAt,
                     };
                 }
             case Challenge.Scheme.Bearer:
@@ -105,8 +106,9 @@ public sealed class DefaultAuthChallengeHandler : IAuthChallengeHandler
         return new AuthChallengeResolution
         {
             Scheme = Challenge.Scheme.Bearer,
-            Token = bearerToken,
+            Token = bearerToken.Token,
             CacheScopeKey = cacheKey,
+            ExpiresAt = bearerToken.ExpiresAt,
         };
     }
 }
