@@ -156,6 +156,25 @@ public class RegistryAuthenticatorPrototypeTest
         Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
     }
 
+    [Fact]
+    public async Task Recovering_StaleToken401_AnonymousResource_ReturnsColdSuccess()
+    {
+        // A public resource whose only problem is the stale cached token: the cold, no-auth request
+        // succeeds. Recovery must return that success, not the original stale-token 401.
+        const string host = "registry-anonymous.example.com";
+        HttpResponseMessage Registry(HttpRequestMessage req)
+            => req.Headers.Authorization?.Parameter == _staleToken ? NoChallenge() : Ok();
+
+        var authenticator = new RecoveringRegistryAuthenticator();
+        authenticator.Cache.SetCache(host, Challenge.Scheme.Bearer, string.Empty, _staleToken);
+        using var request = new HttpRequestMessage(HttpMethod.Get, $"https://{host}/v2/");
+
+        var response = await authenticator.SendAsync(
+            request, new AuthContext(), Transport(Registry), CancellationToken.None);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+    }
+
     /// <summary>
     /// Recovery composed as a ~10-line subclass of the default authenticator: it reuses the protected
     /// base helpers, needs no <see cref="Client"/>, and introduces no new context surface. On an
@@ -180,13 +199,16 @@ public class RegistryAuthenticatorPrototypeTest
                 return null;
             }
 
-            using var cold = await SendWithoutAuthorizationAsync(challenge, context, transport, cancellationToken);
+            var cold = await SendWithoutAuthorizationAsync(challenge, context, transport, cancellationToken);
             if (cold.StatusCode != HttpStatusCode.Unauthorized)
             {
-                return null;
+                // The request succeeds without credentials (e.g. an anonymous resource whose only
+                // problem was the stale token) — hand that response back rather than the stale 401.
+                return cold;
             }
 
             var (scheme, parameters) = ParseChallengeSafe(cold);
+            cold.Dispose();
             return await AuthenticateFromChallengeAsync(
                 challenge, scheme, parameters, context, transport, cancellationToken);
         }

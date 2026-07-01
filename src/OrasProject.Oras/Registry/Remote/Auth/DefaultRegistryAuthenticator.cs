@@ -44,16 +44,15 @@ public class DefaultRegistryAuthenticator : IRegistryAuthenticator
 {
     private const string _defaultClientId = "oras-dotnet";
 
-    private static readonly Lazy<IMemoryCache> _sharedMemoryCache =
-        new(() => new MemoryCache(new MemoryCacheOptions { SizeLimit = 1024 }),
-            LazyThreadSafetyMode.ExecutionAndPublication);
+    private ICache _cache = new Cache(new MemoryCache(new MemoryCacheOptions { SizeLimit = 1024 }));
 
-    private ICache? _cache;
-
-    /// <summary>The token cache. Defaults to a shared in-memory cache.</summary>
+    /// <summary>
+    /// The token cache. Defaults to a cache private to this authenticator instance, so tokens do not
+    /// bleed across instances; inject a shared <see cref="ICache"/> to share them deliberately.
+    /// </summary>
     public ICache Cache
     {
-        get => _cache ??= new Cache(_sharedMemoryCache.Value);
+        get => _cache;
         init => _cache = value;
     }
 
